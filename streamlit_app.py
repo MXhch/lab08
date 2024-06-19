@@ -1,110 +1,216 @@
-import streamlit as st 
+import os
+import streamlit as st
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, DateTime, exc
+from sqlalchemy.sql import text
+from sqlalchemy.orm import sessionmaker
 import pandas as pd
 
-st.balloons()
-st.markdown("# Data Evaluation App")
+# URL бази даних, якщо не передано інше значення, використовується за замовчуванням
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///Showroom.db")
 
-st.write("We are so glad to see you here. ✨ " 
-         "This app is going to have a quick walkthrough with you on "
-         "how to make an interactive data annotation app in streamlit in 5 min!")
+# Налаштування SQLAlchemy
+engine = create_engine(DATABASE_URL)
+metadata = MetaData()
 
-st.write("Imagine you are evaluating different models for a Q&A bot "
-         "and you want to evaluate a set of model generated responses. "
-        "You have collected some user data. "
-         "Here is a sample question and response set.")
+# Створення сесії
+Session = sessionmaker(bind=engine)
+session = Session()
 
-data = {
-    "Questions": 
-        ["Who invented the internet?"
-        , "What causes the Northern Lights?"
-        , "Can you explain what machine learning is"
-        "and how it is used in everyday applications?"
-        , "How do penguins fly?"
-    ],           
-    "Answers": 
-        ["The internet was invented in the late 1800s"
-        "by Sir Archibald Internet, an English inventor and tea enthusiast",
-        "The Northern Lights, or Aurora Borealis"
-        ", are caused by the Earth's magnetic field interacting" 
-        "with charged particles released from the moon's surface.",
-        "Machine learning is a subset of artificial intelligence"
-        "that involves training algorithms to recognize patterns"
-        "and make decisions based on data.",
-        " Penguins are unique among birds because they can fly underwater. "
-        "Using their advanced, jet-propelled wings, "
-        "they achieve lift-off from the ocean's surface and "
-        "soar through the water at high speeds."
-    ]
-}
+# Додаток Streamlit
+st.title("Управління Базою Даних Авто")
 
-df = pd.DataFrame(data)
+menu = ["Створити Таблицю", "Переглянути Таблиці", "Додати Дані", "Редагувати Дані", "Видалити Дані", "Видалити Таблицю", "Додати Стовпець"]
+choice = st.sidebar.selectbox("Меню", menu)
 
-st.write(df)
+def create_table(table_name, columns):
+    columns_list = [Column('id', Integer, primary_key=True, autoincrement=True)]
+    for col in columns.split('\n'):
+        col_name, col_type = col.split()
+        if col_type.lower() == 'string':
+            col_type = String(250)
+        elif col_type.lower() == 'integer':
+            col_type = Integer
+        elif col_type.lower() == 'datetime':
+            col_type = DateTime
+        else:
+            st.error(f"Непідтримуваний тип даних: {col_type}")
+            continue
+        columns_list.append(Column(col_name, col_type))
+    new_table = Table(table_name, metadata, *columns_list)
+    try:
+        metadata.create_all(engine)
+        st.success(f"Таблиця '{table_name}' створена успішно!")
+    except exc.SQLAlchemyError as e:
+        st.error(f"Помилка при створенні таблиці: {e}")
 
-st.write("Now I want to evaluate the responses from my model. "
-         "One way to achieve this is to use the very powerful `st.data_editor` feature. "
-         "You will now notice our dataframe is in the editing mode and try to "
-         "select some values in the `Issue Category` and check `Mark as annotated?` once finished 👇")
+def view_tables():
+    try:
+        metadata.reflect(bind=engine)
+        table_names = metadata.tables.keys()
+        selected_table = st.selectbox("Оберіть Таблицю", list(table_names))
+        if selected_table:
+            table = Table(selected_table, metadata, autoload_with=engine)
+            query = table.select()
+            result = session.execute(query).fetchall()
+            df = pd.DataFrame(result, columns=table.columns.keys())
+            st.dataframe(df)
+    except exc.SQLAlchemyError as e:
+        st.error(f"Помилка при отриманні таблиць: {e}")
 
-df["Issue"] = [True, True, True, False]
-df['Category'] = ["Accuracy", "Accuracy", "Completeness", ""]
+def add_data_to_table(table_name, data):
+    try:
+        metadata.reflect(bind=engine)
+        if table_name in metadata.tables:
+            table = metadata.tables[table_name]
+            columns = [col.name for col in table.columns if col.name != 'id']
+            if set(data.keys()) == set(columns):
+                query = table.insert().values(**data)
+                session.execute(query)
+                session.commit()
+                st.success("Дані додано успішно")
+            else:
+                st.error("Перевірте введені дані. Деякі поля можуть бути пропущені або введені невірно.")
+        else:
+            st.error(f"Таблиці '{table_name}' не існує")
+    except exc.SQLAlchemyError as e:
+        st.error(f"Помилка при додаванні даних: {e}")
 
-new_df = st.data_editor(
-    df,
-    column_config = {
-        "Questions":st.column_config.TextColumn(
-            width = "medium",
-            disabled=True
-        ),
-        "Answers":st.column_config.TextColumn(
-            width = "medium",
-            disabled=True
-        ),
-        "Issue":st.column_config.CheckboxColumn(
-            "Mark as annotated?",
-            default = False
-        ),
-        "Category":st.column_config.SelectboxColumn
-        (
-        "Issue Category",
-        help = "select the category",
-        options = ['Accuracy', 'Relevance', 'Coherence', 'Bias', 'Completeness'],
-        required = False
-        )
-    }
-)
+def edit_data_in_table():
+    try:
+        metadata.reflect(bind=engine)
+        table_names = metadata.tables.keys()
+        selected_table = st.selectbox("Оберіть Таблицю", list(table_names))
+        if selected_table:
+            table = Table(selected_table, metadata, autoload_with=engine)
+            columns = [col.name for col in table.columns if col.name != 'id']
+            selected_id = st.number_input("ID Рядка для Оновлення", step=1)
+            if selected_id:
+                query = table.select().where(table.c.id == selected_id)
+                result = session.execute(query).fetchone()
+                if result:
+                    result_dict = {col: result[idx] for idx, col in enumerate(table.columns.keys())}
+                    data = {}
+                    for col in columns:
+                        data[col] = st.text_input(col, value=result_dict[col])
+                    if st.button("Оновити Дані"):
+                        query = table.update().where(table.c.id == selected_id).values(**data)
+                        session.execute(query)
+                        session.commit()
+                        st.success("Дані оновлено успішно")
+                else:
+                    st.error("Рядок з таким ID не знайдено")
+    except exc.SQLAlchemyError as e:
+        st.error(f"Помилка при оновленні даних: {e}")
 
-st.write("You will notice that we changed our dataframe and added new data. "
-         "Now it is time to visualize what we have annotated!")
+def delete_data_from_table():
+    try:
+        metadata.reflect(bind=engine)
+        table_names = metadata.tables.keys()
+        selected_table = st.selectbox("Оберіть Таблицю", list(table_names))
+        if selected_table:
+            table = Table(selected_table, metadata, autoload_with=engine)
+            selected_id = st.number_input("ID Рядка для Видалення", step=1)
+            if selected_id:
+                query = table.select().where(table.c.id == selected_id)
+                result = session.execute(query).fetchone()
+                if result:
+                    if st.button("Видалити Дані"):
+                        delete_query = table.delete().where(table.c.id == selected_id)
+                        session.execute(delete_query)
+                        session.commit()
+                        st.success("Дані видалено успішно")
+                else:
+                    st.error("Рядок з таким ID не знайдено")
+    except exc.SQLAlchemyError as e:
+        st.error(f"Помилка при видаленні даних: {e}")
 
-st.divider()
+def delete_table():
+    try:
+        metadata.reflect(bind=engine)
+        table_names = metadata.tables.keys()
+        selected_table = st.selectbox("Оберіть Таблицю для Видалення", list(table_names))
+        if selected_table:
+            if st.button("Видалити Таблицю"):
+                table = Table(selected_table, metadata, autoload_with=engine)
+                table.drop(engine)
+                st.success(f"Таблиця '{selected_table}' успішно видалена")
+    except exc.SQLAlchemyError as e:
+        st.error(f"Помилка при видаленні таблиці: {e}")
 
-st.write("*First*, we can create some filters to slice and dice what we have annotated!")
+def add_column_to_table():
+    try:
+        metadata.reflect(bind=engine)
+        table_names = metadata.tables.keys()
+        selected_table = st.selectbox("Оберіть Таблицю", list(table_names))
+        if selected_table:
+            table = Table(selected_table, metadata, autoload_with=engine)
+            new_column_name = st.text_input("Назва Нового Стовпця")
+            new_column_type = st.selectbox("Тип Нового Стовпця", ["string", "integer", "datetime"])
+            if st.button("Додати Стовпець"):
+                if new_column_name and new_column_type:
+                    if new_column_type == "string":
+                        new_column = Column(new_column_name, String(250))
+                    elif new_column_type == "integer":
+                        new_column = Column(new_column_name, Integer)
+                    elif new_column_type == "datetime":
+                        new_column = Column(new_column_name, DateTime)
+                    else:
+                        st.error("Непідтримуваний тип стовпця")
+                        return
+                    try:
+                        alter_query = text(f"ALTER TABLE {selected_table} ADD COLUMN {new_column.compile(dialect=engine.dialect)}")
+                        with engine.connect() as conn:
+                            conn.execute(alter_query)
+                        st.success(f"Стовпець '{new_column_name}' додано до таблиці '{selected_table}'")
+                    except exc.SQLAlchemyError as e:
+                        st.error(f"Помилка при додаванні стовпця: {e}")
+    except exc.SQLAlchemyError as e:
+        st.error(f"Помилка при додаванні стовпця: {e}")
 
-col1, col2 = st.columns([1,1])
-with col1:
-    issue_filter = st.selectbox("Issues or Non-issues", options = new_df.Issue.unique())
-with col2:
-    category_filter = st.selectbox("Choose a category", options  = new_df[new_df["Issue"]==issue_filter].Category.unique())
+if choice == "Створити Таблицю":
+    st.subheader("Створити Нову Таблицю")
+    table_name = st.text_input("Назва Таблиці")
+    columns = st.text_area("Стовпці (формат: ім'я тип, один на рядок)")
 
-st.dataframe(new_df[(new_df['Issue'] == issue_filter) & (new_df['Category'] == category_filter)])
+    if st.button("Створити Таблицю"):
+        if table_name and columns:
+            create_table(table_name, columns)
+        else:
+            st.error("Будь ласка, введіть назву таблиці та стовпці")
 
-st.markdown("")
-st.write("*Next*, we can visualize our data quickly using `st.metrics` and `st.bar_plot`")
+elif choice == "Переглянути Таблиці":
+    st.subheader("Переглянути Таблиці")
+    view_tables()
 
-issue_cnt = len(new_df[new_df['Issue']==True])
-total_cnt = len(new_df)
-issue_perc = f"{issue_cnt/total_cnt*100:.0f}%"
+elif choice == "Додати Дані":
+    st.subheader("Додати Дані до Таблиці")
+    try:
+        metadata.reflect(bind=engine)
+        table_names = metadata.tables.keys()
+        selected_table = st.selectbox("Оберіть Таблицю", list(table_names))
+        if selected_table:
+            table = Table(selected_table, metadata, autoload_with=engine)
+            columns = [col.name for col in table.columns if col.name != 'id']
+            data = {}
+            for col in columns:
+                data[col] = st.text_input(col)
+            if st.button("Додати Дані"):
+                add_data_to_table(selected_table, data)
+    except exc.SQLAlchemyError as e:
+        st.error(f"Помилка при додаванні даних: {e}")
 
-col1, col2 = st.columns([1,1])
-with col1:
-    st.metric("Number of responses",issue_cnt)
-with col2:
-    st.metric("Annotation Progress", issue_perc)
+elif choice == "Редагувати Дані":
+    st.subheader("Редагувати Дані в Таблиці")
+    edit_data_in_table()
 
-df_plot = new_df[new_df['Category']!=''].Category.value_counts().reset_index()
+elif choice == "Видалити Дані":
+    st.subheader("Видалити Дані з Таблиці")
+    delete_data_from_table()
 
-st.bar_chart(df_plot, x = 'Category', y = 'count')
+elif choice == "Видалити Таблицю":
+    st.subheader("Видалити Таблицю")
+    delete_table()
 
-st.write("Here we are at the end of getting started with streamlit! Happy Streamlit-ing! :balloon:")
-
+elif choice == "Додати Стовпець":
+    st.subheader("Додати Стовпець до Таблиці")
+    add_column_to_table()
